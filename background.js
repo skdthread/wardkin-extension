@@ -168,6 +168,7 @@ async function finishSession({ celebrate = false, alreadyShown = false } = {}) {
     }
 
     await clearSession();
+    await clearOpenTabWarnings();
     if (celebrate) {
       await openCelebration(session, { alreadyShown });
       return;
@@ -231,6 +232,7 @@ async function startSession(host, minutes) {
   await chrome.storage.local.remove(PENDING_KEY);
   await chrome.alarms.clear(SESSION_ALARM);
   await chrome.alarms.create(SESSION_ALARM, { when: session.endsAt });
+  pingOpenTabs().catch(() => {});
   return { ok: true, session };
 }
 
@@ -255,6 +257,247 @@ async function focusSessionHost() {
   await chrome.tabs.create({ url: `https://${session.host}` });
   return { ok: true, created: true };
 }
+
+function injectStayOnTaskWarning(session) {
+  const dismissKey = "wardkinSessionDismissed";
+  if (!session?.host || !session.endsAt || session.endsAt <= Date.now()) return;
+  if (document.getElementById("wardkin-warn-root")) return;
+
+  const host = (window.location.hostname || "")
+    .replace(/^www\./i, "")
+    .toLowerCase();
+  if (host === session.host || host.endsWith(`.${session.host}`)) return;
+
+  try {
+    if (sessionStorage.getItem(dismissKey) === String(session.startedAt)) return;
+  } catch {
+    // Ignore quota or disabled storage.
+  }
+
+  const formatRemaining = (ms) => {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = String(totalSeconds % 60).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`;
+    }
+    return `${minutes}:${seconds}`;
+  };
+
+  const root = document.createElement("div");
+  root.id = "wardkin-warn-root";
+  root.style.all = "initial";
+  root.style.position = "fixed";
+  root.style.inset = "0";
+  root.style.zIndex = "2147483646";
+
+  const shadow = root.attachShadow({ mode: "closed" });
+  shadow.innerHTML = `
+    <style>
+      :host, .overlay { all: initial; }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: rgba(17, 24, 39, 0.55);
+        font-family: "Segoe UI", system-ui, sans-serif;
+        pointer-events: auto;
+      }
+      .card {
+        width: min(420px, 100%);
+        padding: 24px;
+        border-radius: 12px;
+        background: #fff;
+        color: #111827;
+        text-align: center;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+      }
+      h1 {
+        margin: 0 0 8px;
+        color: #b45309;
+        font-size: 1.25rem;
+        font-weight: 700;
+      }
+      p {
+        margin: 0 0 8px;
+        color: #4b5563;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      .remaining {
+        margin-bottom: 16px;
+        color: #6b7280;
+        font-variant-numeric: tabular-nums;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+      }
+      button {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 12px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .return { background: #b45309; color: #fff; }
+      .return:hover { background: #92400e; }
+      .continue { background: #f3f4f6; color: #111827; }
+      .continue:hover { background: #e5e7eb; }
+    </style>
+    <div class="overlay">
+      <div class="card">
+        <h1>Stay on task</h1>
+        <p>You have a concentration session on <strong></strong>.</p>
+        <p class="remaining"></p>
+        <div class="actions">
+          <button class="return" type="button">Return to site</button>
+          <button class="continue" type="button">Continue anyway</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  shadow.querySelector("strong").textContent = session.host;
+  const remainingEl = shadow.querySelector(".remaining");
+  let intervalId = 0;
+  const updateRemaining = () => {
+    const remaining = session.endsAt - Date.now();
+    if (remaining <= 0) {
+      clearInterval(intervalId);
+      root.remove();
+      document.documentElement.removeAttribute("data-wardkin-warning");
+      return;
+    }
+    remainingEl.textContent = `${formatRemaining(remaining)} remaining`;
+  };
+  updateRemaining();
+  intervalId = setInterval(updateRemaining, 1000);
+  root.dataset.wardkinTick = String(intervalId);
+  document.documentElement.setAttribute("data-wardkin-warning", "true");
+
+  shadow.querySelector(".return").addEventListener("click", () => {
+    try {
+      chrome.runtime.sendMessage({ type: "focusSessionHost" });
+    } catch {
+      // Extension context unavailable.
+    }
+  });
+  shadow.querySelector(".continue").addEventListener("click", () => {
+    try {
+      sessionStorage.setItem(dismissKey, String(session.startedAt));
+    } catch {
+      // Ignore quota or disabled storage.
+    }
+    clearInterval(intervalId);
+    root.remove();
+    document.documentElement.removeAttribute("data-wardkin-warning");
+  });
+
+  document.documentElement.appendChild(root);
+}
+
+function removeStayOnTaskWarning() {
+  const root = document.getElementById("wardkin-warn-root");
+  const tick = root?.dataset?.wardkinTick;
+  if (tick) clearInterval(Number(tick));
+  root?.remove();
+  document.documentElement.removeAttribute("data-wardkin-warning");
+}
+
+async function pingTabApplyState(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "applyState" });
+    return Boolean(response?.ok);
+  } catch {
+    return false;
+  }
+}
+
+async function requestApplyState(tabId, url) {
+  const session = await getActiveSession();
+  if (!session || !tabId) return;
+  if (url && !/^https?:/i.test(url)) return;
+
+  const host = hostFromUrl(url);
+  if (host && isSameSite(host, session.host)) return;
+
+  if (await pingTabApplyState(tabId)) return;
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: injectStayOnTaskWarning,
+      args: [
+        {
+          host: session.host,
+          durationMinutes: session.durationMinutes,
+          startedAt: session.startedAt,
+          endsAt: session.endsAt,
+        },
+      ],
+    });
+  } catch {
+    // Tab cannot be scripted (chrome://, PDF, new tab, and similar).
+  }
+}
+
+async function pingOpenTabs() {
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.map((tab) => requestApplyState(tab.id, tab.url)));
+}
+
+async function clearOpenTabWarnings() {
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (!tab?.id) return;
+      if (tab.url && !/^https?:/i.test(tab.url)) return;
+
+      try {
+        if (await pingTabApplyState(tab.id)) return;
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          world: "ISOLATED",
+          func: removeStayOnTaskWarning,
+        });
+      } catch {
+        // Tab cannot be scripted (chrome://, PDF, new tab, and similar).
+      }
+    })
+  );
+}
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  chrome.tabs
+    .get(activeInfo.tabId)
+    .then((tab) => requestApplyState(tab.id, tab.url))
+    .catch(() => {});
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.tabs
+    .query({ active: true, windowId })
+    .then((tabs) => {
+      const tab = tabs[0];
+      if (tab) return requestApplyState(tab.id, tab.url);
+    })
+    .catch(() => {});
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!tab.active) return;
+  if (!changeInfo.url && changeInfo.status !== "complete") return;
+  requestApplyState(tabId, tab.url);
+});
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === SESSION_ALARM) {

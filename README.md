@@ -20,8 +20,8 @@ You can also start a concentration session for the current website (30 minutes b
 
 1. Open a website you want to focus on and click the Wardkin icon
 2. Leave duration at **30** minutes (or set another length) and click **Start session**
-3. Open a different website in another tab — you should see a “Stay on task” reminder with the focused site and time remaining
+3. Switch to a different website in another already-open tab (no reload needed) — you should see a “Stay on task” reminder with the focused site and time remaining
 4. Click **Return to site** to go back, or **Continue anyway** to dismiss the reminder on that tab
 5. When the timer finishes, a small Gargou toast appears at the top-right of the current page. Ending a session early from the popup skips that celebration.
 
-If you change extension files, click **Reload** on the Wardkin card in `chrome://extensions`, then test again.
+If you change extension files, click **Reload** on the Wardkin card in `chrome://extensions`, then test again. You do not need to reload the websites you already have open.

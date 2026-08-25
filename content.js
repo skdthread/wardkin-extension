@@ -408,7 +408,10 @@ function hideWarning() {
   stopWarningTimers();
   shownSessionStartedAt = null;
   document.documentElement.removeAttribute(WARN_HOST_ATTR);
-  document.getElementById("wardkin-warn-root")?.remove();
+  const root = document.getElementById("wardkin-warn-root");
+  const tick = root?.dataset?.wardkinTick;
+  if (tick) clearInterval(Number(tick));
+  root?.remove();
 }
 
 let celebrateHideTimer = null;
@@ -528,11 +531,16 @@ function showCelebrate(payload = {}) {
 }
 
 async function applyState() {
-  const result = await chrome.storage.local.get([
-    STORAGE_KEY,
-    SESSION_KEY,
-    PENDING_KEY,
-  ]);
+  let result;
+  try {
+    result = await chrome.storage.local.get([
+      STORAGE_KEY,
+      SESSION_KEY,
+      PENDING_KEY,
+    ]);
+  } catch {
+    return;
+  }
   const hosts = Array.isArray(result[STORAGE_KEY]) ? result[STORAGE_KEY] : [];
   const session = result[SESSION_KEY] || null;
   const sessionActive = isSessionActive(session);
@@ -569,13 +577,19 @@ async function applyState() {
 
 applyState();
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "applyState") {
+    Promise.resolve(applyState())
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
   if (message?.type === "sessionComplete" && document.visibilityState === "visible") {
     showCelebrate(message);
   }
 });
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
+chrome.storage?.onChanged?.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[STORAGE_KEY] || changes[SESSION_KEY]) {
     applyState();
@@ -588,13 +602,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
-  chrome.storage.local.get(PENDING_KEY).then((result) => {
-    maybeShowPendingCelebration(result[PENDING_KEY]);
-  });
+  applyState();
 });
 
 window.addEventListener("pageshow", () => {
-  chrome.storage.local.get(PENDING_KEY).then((result) => {
-    maybeShowPendingCelebration(result[PENDING_KEY]);
-  });
+  applyState();
 });

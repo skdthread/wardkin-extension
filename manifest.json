@@ -3,7 +3,7 @@
   "name": "Wardkin",
   "version": "0.1.0",
   "description": "Block distracting websites and stay focused.",
-  "permissions": ["storage", "tabs", "alarms"],
+  "permissions": ["storage", "tabs", "alarms", "scripting"],
   "host_permissions": ["*://*/*"],
   "background": {
     "service_worker": "background.js"
