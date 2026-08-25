@@ -55,6 +55,52 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.secondary {
+  background: #fff;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #f9fafb;
+}
+
+label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+input[type="number"] {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+}
+
+.hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-focus {
+  margin: 0 0 4px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.session-remaining {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .status {
   margin: 8px 0 0;
   color: var(--muted);
@@ -118,6 +164,8 @@ li button:hover:not(:disabled) {
 }
 
 .empty[hidden],
-.status[hidden] {
+.status[hidden],
+#session-idle[hidden],
+#session-active[hidden] {
   display: none;
 }

@@ -16,6 +16,32 @@
     <p id="status" class="status" hidden></p>
 
     <section>
+      <h2>Concentration session</h2>
+      <div id="session-idle">
+        <label for="session-minutes">Duration (minutes)</label>
+        <input
+          id="session-minutes"
+          type="number"
+          min="1"
+          max="180"
+          value="30"
+          step="1"
+        />
+        <button id="start-session-btn" type="button" disabled>
+          Start session
+        </button>
+        <p class="hint">You’ll get a reminder if you leave this site.</p>
+      </div>
+      <div id="session-active" hidden>
+        <p id="session-focus" class="session-focus"></p>
+        <p id="session-remaining" class="session-remaining">0:00 remaining</p>
+        <button id="end-session-btn" class="secondary" type="button">
+          End session
+        </button>
+      </div>
+    </section>
+
+    <section>
       <h2>Blocked sites</h2>
       <ul id="blocked-list"></ul>
       <p id="empty-state" class="empty">No sites blocked yet.</p>
