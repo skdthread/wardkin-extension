@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wardkin</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Wardkin</h1>
+      <p id="current-host">Checking current site…</p>
+    </header>
+
+    <button id="block-btn" type="button" disabled>Block this site</button>
+    <p id="status" class="status" hidden></p>
+
+    <section>
+      <h2>Blocked sites</h2>
+      <ul id="blocked-list"></ul>
+      <p id="empty-state" class="empty">No sites blocked yet.</p>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
