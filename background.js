@@ -82,12 +82,136 @@ async function getLastFocusedNormalTab() {
 }
 
 async function sendCelebration(tabId, payload) {
-  await chrome.tabs.sendMessage(tabId, {
+  const response = await chrome.tabs.sendMessage(tabId, {
     type: "sessionComplete",
     host: payload.host,
     durationMinutes: payload.durationMinutes,
     startedAt: payload.startedAt,
   });
+  return Boolean(response?.shown);
+}
+
+function injectCelebration(payload) {
+  if (document.getElementById("wardkin-celebrate-root")) return true;
+
+  const root = document.createElement("div");
+  root.id = "wardkin-celebrate-root";
+  root.style.position = "fixed";
+  root.style.top = "16px";
+  root.style.right = "20px";
+  root.style.zIndex = "2147483647";
+
+  const shadow = root.attachShadow({ mode: "closed" });
+  shadow.innerHTML = `
+    <style>
+      .toast {
+        box-sizing: border-box;
+        width: 320px;
+        padding: 20px 20px 18px;
+        border-radius: 16px;
+        background: #fff7ed;
+        color: #111827;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        text-align: center;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+      }
+      img {
+        display: block;
+        width: 240px;
+        height: 240px;
+        margin: 0 auto 8px;
+        image-rendering: pixelated;
+      }
+      strong {
+        display: block;
+        margin: 0 0 6px;
+        font-size: 20px;
+        font-weight: 700;
+      }
+      p {
+        margin: 0 0 14px;
+        color: #6b7280;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: #b45309;
+        color: #fff;
+        font: 600 14px/1.2 "Segoe UI", system-ui, sans-serif;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #92400e;
+      }
+    </style>
+    <div class="toast" role="status">
+      <img alt="Gargou" width="240" height="240" />
+      <strong>You did it!</strong>
+      <p></p>
+      <button type="button">Thanks, Gargou</button>
+    </div>
+  `;
+
+  const img = shadow.querySelector("img");
+  if (payload?.gargouSrc) img.src = payload.gargouSrc;
+  const minutes = Number.parseInt(payload?.durationMinutes, 10);
+  const details = minutes > 0 ? `${minutes}-minute session` : "session";
+  shadow.querySelector("p").textContent =
+    `Gargou is proud of you for finishing your ${details}.`;
+  shadow.querySelector("button").addEventListener("click", () => {
+    root.remove();
+  });
+
+  (document.documentElement || document.body)?.appendChild(root);
+
+  if (payload?.startedAt != null) {
+    try {
+      chrome.runtime
+        .sendMessage({
+          type: "celebrationShown",
+          startedAt: payload.startedAt,
+        })
+        ?.catch?.(() => {});
+    } catch {
+      // Extension context unavailable.
+    }
+  }
+
+  return Boolean(document.getElementById("wardkin-celebrate-root"));
+}
+
+async function injectCelebrationOnTab(tabId, payload) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: injectCelebration,
+      args: [
+        {
+          host: payload.host,
+          durationMinutes: payload.durationMinutes,
+          startedAt: payload.startedAt,
+          gargouSrc: chrome.runtime.getURL("images/gargou.png"),
+        },
+      ],
+    });
+    return Boolean(results?.some((item) => item?.result));
+  } catch {
+    return false;
+  }
+}
+
+async function showCelebrationOnTab(tabId, payload) {
+  try {
+    if (await sendCelebration(tabId, payload)) return true;
+  } catch {
+    // No content script on this tab (chrome://, PDF, new tab, and similar).
+  }
+  return injectCelebrationOnTab(tabId, payload);
 }
 
 async function deliverCelebration(payload) {
@@ -104,12 +228,7 @@ async function deliverCelebration(payload) {
     if (!tab?.id || seen.has(tab.id)) continue;
     if (tab.url && !/^https?:/i.test(tab.url)) continue;
     seen.add(tab.id);
-    try {
-      await sendCelebration(tab.id, payload);
-      return true;
-    } catch {
-      // No content script on this tab (chrome://, PDF, new tab, and similar).
-    }
+    if (await showCelebrationOnTab(tab.id, payload)) return true;
   }
 
   return false;
@@ -259,6 +378,7 @@ async function focusSessionHost() {
 }
 
 function injectStayOnTaskWarning(session) {
+  try {
   const dismissKey = "wardkinSessionDismissed";
   if (!session?.host || !session.endsAt || session.endsAt <= Date.now()) return;
   if (document.getElementById("wardkin-warn-root")) return;
@@ -384,7 +504,7 @@ function injectStayOnTaskWarning(session) {
 
   shadow.querySelector(".return").addEventListener("click", () => {
     try {
-      chrome.runtime.sendMessage({ type: "focusSessionHost" });
+      chrome.runtime.sendMessage({ type: "focusSessionHost" })?.catch?.(() => {});
     } catch {
       // Extension context unavailable.
     }
@@ -401,14 +521,21 @@ function injectStayOnTaskWarning(session) {
   });
 
   document.documentElement.appendChild(root);
+  } catch {
+    // Extension context invalidated or page is navigating away.
+  }
 }
 
 function removeStayOnTaskWarning() {
-  const root = document.getElementById("wardkin-warn-root");
-  const tick = root?.dataset?.wardkinTick;
-  if (tick) clearInterval(Number(tick));
-  root?.remove();
-  document.documentElement.removeAttribute("data-wardkin-warning");
+  try {
+    const root = document.getElementById("wardkin-warn-root");
+    const tick = root?.dataset?.wardkinTick;
+    if (tick) clearInterval(Number(tick));
+    root?.remove();
+    document.documentElement.removeAttribute("data-wardkin-warning");
+  } catch {
+    // Document is navigating away.
+  }
 }
 
 async function pingTabApplyState(tabId) {
@@ -420,13 +547,39 @@ async function pingTabApplyState(tabId) {
   }
 }
 
+async function ensureContentScript(tabId, url) {
+  if (!tabId) return false;
+  if (url && !/^https?:/i.test(url)) return false;
+  if (await pingTabApplyState(tabId)) return true;
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"],
+    });
+    return await pingTabApplyState(tabId);
+  } catch {
+    return false;
+  }
+}
+
 async function requestApplyState(tabId, url) {
   const session = await getActiveSession();
   if (!session || !tabId) return;
   if (url && !/^https?:/i.test(url)) return;
 
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status && tab.status !== "complete") return;
+  } catch {
+    return;
+  }
+
   const host = hostFromUrl(url);
-  if (host && isSameSite(host, session.host)) return;
+  if (host && isSameSite(host, session.host)) {
+    await ensureContentScript(tabId, url);
+    return;
+  }
 
   if (await pingTabApplyState(tabId)) return;
 
@@ -462,14 +615,13 @@ async function clearOpenTabWarnings() {
       if (tab.url && !/^https?:/i.test(tab.url)) return;
 
       try {
-        if (await pingTabApplyState(tab.id)) return;
         await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           world: "ISOLATED",
           func: removeStayOnTaskWarning,
         });
       } catch {
-        // Tab cannot be scripted (chrome://, PDF, new tab, and similar).
+        // Tab cannot be scripted, or the document is navigating away.
       }
     })
   );
@@ -491,12 +643,6 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
       if (tab) return requestApplyState(tab.id, tab.url);
     })
     .catch(() => {});
-});
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!tab.active) return;
-  if (!changeInfo.url && changeInfo.status !== "complete") return;
-  requestApplyState(tabId, tab.url);
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {

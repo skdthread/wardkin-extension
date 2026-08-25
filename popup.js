@@ -200,4 +200,4 @@ chrome.storage?.onChanged?.addListener((changes, areaName) => {
   }
 });
 
-init();
+init().catch(() => {});

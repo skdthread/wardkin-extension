@@ -1,9 +1,189 @@
+(() => {
+if (globalThis.__wardkinApplyState) {
+  try {
+    globalThis.__wardkinApplyState();
+  } catch {
+    // Previous instance is gone (extension reload or page navigation).
+  }
+  return;
+}
+
 const STORAGE_KEY = "blockedHosts";
 const SESSION_KEY = "concentrationSession";
 const PENDING_KEY = "pendingCelebration";
 const DISMISS_KEY = "wardkinSessionDismissed";
 const OVERLAY_HOST_ATTR = "data-wardkin-overlay";
 const WARN_HOST_ATTR = "data-wardkin-warning";
+
+let listenersDetached = false;
+
+function isContextInvalidatedError(reason) {
+  const text = String(reason?.message ?? reason ?? "");
+  return text.includes("Extension context invalidated");
+}
+
+// Last-resort net: if any promise from this script still rejects with a
+// context-invalidated error (e.g. the extension is reloaded mid-request),
+// keep it out of the console and shut this instance down.
+window.addEventListener("unhandledrejection", (event) => {
+  if (isContextInvalidatedError(event.reason)) {
+    event.preventDefault();
+    detachListeners();
+  }
+});
+
+window.addEventListener("error", (event) => {
+  if (isContextInvalidatedError(event.error ?? event.message)) {
+    event.preventDefault();
+    detachListeners();
+  }
+});
+
+let warningTimer = null;
+let warningExpiryTimer = null;
+let sessionExpiryTimer = null;
+let shownSessionStartedAt = null;
+let expiryNotifiedStartedAt = null;
+
+function isExtensionAlive() {
+  try {
+    return Boolean(chrome.runtime?.id);
+  } catch {
+    return false;
+  }
+}
+
+function swallowLastError() {
+  try {
+    void chrome.runtime.lastError;
+  } catch {
+    // Extension context invalidated.
+  }
+}
+
+function getLocal(keys) {
+  return new Promise((resolve) => {
+    if (listenersDetached || !isExtensionAlive()) {
+      resolve(null);
+      return;
+    }
+    try {
+      const pending = chrome.storage.local.get(keys, (result) => {
+        swallowLastError();
+        resolve(result ?? null);
+      });
+      // MV3 may still return a Promise; ignore its rejection so Chrome
+      // does not report "Uncaught (in promise) Extension context invalidated".
+      pending?.catch?.(() => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function sendRuntimeMessage(message) {
+  if (listenersDetached || !isExtensionAlive()) return;
+  try {
+    const pending = chrome.runtime.sendMessage(message, () => {
+      swallowLastError();
+    });
+    pending?.catch?.(() => {});
+  } catch {
+    // Extension context invalidated.
+  }
+}
+
+function refreshState() {
+  applyState().catch(() => {});
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState !== "visible") return;
+  refreshState();
+}
+
+function onPageShow() {
+  refreshState();
+}
+
+function onPageHide(event) {
+  if (event.persisted) return;
+  detachListeners();
+}
+
+function onStorageChanged(changes, areaName) {
+  if (listenersDetached || areaName !== "local") return;
+  if (changes[STORAGE_KEY] || changes[SESSION_KEY]) {
+    refreshState();
+    return;
+  }
+  if (changes[PENDING_KEY]) {
+    maybeShowPendingCelebration(changes[PENDING_KEY].newValue || null);
+  }
+}
+
+function reply(sendResponse, payload) {
+  try {
+    sendResponse(payload);
+  } catch {
+    detachListeners();
+  }
+}
+
+function onRuntimeMessage(message, _sender, sendResponse) {
+  try {
+    if (listenersDetached || !isExtensionAlive()) {
+      detachListeners();
+      return;
+    }
+    if (message?.type === "applyState") {
+      Promise.resolve(applyState())
+        .then(() => reply(sendResponse, { ok: true }))
+        .catch(() => {
+          reply(sendResponse, { ok: false });
+          detachListeners();
+        });
+      return true;
+    }
+    if (message?.type === "sessionComplete") {
+      const visible = document.visibilityState === "visible";
+      if (visible) {
+        showCelebrate(message);
+      }
+      reply(sendResponse, {
+        shown:
+          visible && Boolean(document.getElementById("wardkin-celebrate-root")),
+      });
+    }
+  } catch {
+    detachListeners();
+  }
+}
+
+function detachListeners() {
+  if (listenersDetached) return;
+  listenersDetached = true;
+
+  stopWarningTimers();
+  if (sessionExpiryTimer) {
+    clearTimeout(sessionExpiryTimer);
+    sessionExpiryTimer = null;
+  }
+
+  document.removeEventListener("visibilitychange", onVisibilityChange);
+  window.removeEventListener("pageshow", onPageShow);
+  window.removeEventListener("pagehide", onPageHide);
+  try {
+    chrome.storage?.onChanged?.removeListener(onStorageChanged);
+  } catch {
+    // Extension context invalidated.
+  }
+  try {
+    chrome.runtime?.onMessage?.removeListener(onRuntimeMessage);
+  } catch {
+    // Extension context invalidated.
+  }
+}
 
 function normalizeHost(hostname) {
   return hostname.replace(/^www\./i, "").toLowerCase();
@@ -206,12 +386,6 @@ function hideOverlay() {
   detachScrollGuards();
 }
 
-let warningTimer = null;
-let warningExpiryTimer = null;
-let sessionExpiryTimer = null;
-let shownSessionStartedAt = null;
-let expiryNotifiedStartedAt = null;
-
 function stopWarningTimers() {
   if (warningTimer) {
     clearInterval(warningTimer);
@@ -245,9 +419,7 @@ function armSessionExpiry(session) {
         startedAt: session.startedAt,
       });
     }
-    chrome.runtime
-      .sendMessage({ type: "sessionExpired", alreadyShown: visible })
-      .catch(() => {});
+    sendRuntimeMessage({ type: "sessionExpired", alreadyShown: visible });
   };
 
   if (remainingMs <= 0) {
@@ -386,7 +558,7 @@ function showWarning(session) {
     warningTimer = setInterval(updateRemaining, 1000);
 
     shadow.querySelector(".return").addEventListener("click", () => {
-      chrome.runtime.sendMessage({ type: "focusSessionHost" });
+      sendRuntimeMessage({ type: "focusSessionHost" });
     });
     shadow.querySelector(".continue").addEventListener("click", () => {
       dismissWarning(session);
@@ -454,7 +626,13 @@ function showCelebrate(payload = {}) {
     root.style.zIndex = "2147483647";
 
     const shadow = root.attachShadow({ mode: "closed" });
-    const gargouSrc = chrome.runtime.getURL("images/gargou.png");
+    let gargouSrc = "";
+    try {
+      gargouSrc = chrome.runtime.getURL("images/gargou.png");
+    } catch {
+      detachListeners();
+      return;
+    }
     shadow.innerHTML = `
       <style>
         .toast {
@@ -517,9 +695,7 @@ function showCelebrate(payload = {}) {
 
     document.documentElement.appendChild(root);
     if (startedAt != null) {
-      chrome.runtime
-        .sendMessage({ type: "celebrationShown", startedAt })
-        .catch(() => {});
+      sendRuntimeMessage({ type: "celebrationShown", startedAt });
     }
   };
 
@@ -531,80 +707,70 @@ function showCelebrate(payload = {}) {
 }
 
 async function applyState() {
-  let result;
   try {
-    result = await chrome.storage.local.get([
+    if (listenersDetached || !isExtensionAlive()) return;
+
+    const result = await getLocal([
       STORAGE_KEY,
       SESSION_KEY,
       PENDING_KEY,
     ]);
-  } catch {
-    return;
-  }
-  const hosts = Array.isArray(result[STORAGE_KEY]) ? result[STORAGE_KEY] : [];
-  const session = result[SESSION_KEY] || null;
-  const sessionActive = isSessionActive(session);
+    if (!result || listenersDetached || !isExtensionAlive()) return;
 
-  if (sessionActive) {
-    hideCelebrate();
-    shownCelebrationStartedAt = null;
-  }
+    const hosts = Array.isArray(result[STORAGE_KEY]) ? result[STORAGE_KEY] : [];
+    const session = result[SESSION_KEY] || null;
+    const sessionActive = isSessionActive(session);
 
-  if (isHostBlocked(hosts)) {
-    hideWarning();
-    showOverlay();
+    if (sessionActive) {
+      hideCelebrate();
+      shownCelebrationStartedAt = null;
+    }
+
+    if (isHostBlocked(hosts)) {
+      hideWarning();
+      showOverlay();
+      armSessionExpiry(session);
+      if (!sessionActive) {
+        maybeShowPendingCelebration(result[PENDING_KEY]);
+      }
+      return;
+    }
+
+    hideOverlay();
+
     armSessionExpiry(session);
+
+    if (isSessionActive(session) && !isSessionHost(session) && !wasWarningDismissed(session)) {
+      showWarning(session);
+    } else {
+      hideWarning();
+    }
+
     if (!sessionActive) {
       maybeShowPendingCelebration(result[PENDING_KEY]);
     }
-    return;
-  }
-
-  hideOverlay();
-
-  armSessionExpiry(session);
-
-  if (isSessionActive(session) && !isSessionHost(session) && !wasWarningDismissed(session)) {
-    showWarning(session);
-  } else {
-    hideWarning();
-  }
-
-  if (!sessionActive) {
-    maybeShowPendingCelebration(result[PENDING_KEY]);
+  } catch {
+    // Page is unloading or the extension was reloaded.
   }
 }
 
-applyState();
+refreshState();
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "applyState") {
-    Promise.resolve(applyState())
-      .then(() => sendResponse({ ok: true }))
-      .catch(() => sendResponse({ ok: false }));
-    return true;
-  }
-  if (message?.type === "sessionComplete" && document.visibilityState === "visible") {
-    showCelebrate(message);
-  }
-});
+try {
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+} catch {
+  detachListeners();
+}
 
-chrome.storage?.onChanged?.addListener((changes, areaName) => {
-  if (areaName !== "local") return;
-  if (changes[STORAGE_KEY] || changes[SESSION_KEY]) {
-    applyState();
-    return;
-  }
-  if (changes[PENDING_KEY]) {
-    maybeShowPendingCelebration(changes[PENDING_KEY].newValue || null);
-  }
-});
+try {
+  chrome.storage?.onChanged?.addListener(onStorageChanged);
+} catch {
+  detachListeners();
+}
 
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") return;
-  applyState();
-});
+document.addEventListener("visibilitychange", onVisibilityChange);
+window.addEventListener("pageshow", onPageShow);
+window.addEventListener("pagehide", onPageHide);
 
-window.addEventListener("pageshow", () => {
-  applyState();
-});
+globalThis.__wardkinApplyState = refreshState;
+})();
